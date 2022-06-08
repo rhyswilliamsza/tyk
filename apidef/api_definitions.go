@@ -5,10 +5,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"text/template"
 	"time"
+
+	uuid "github.com/satori/go.uuid"
 
 	"github.com/jensneuse/graphql-go-tools/pkg/execution/datasource"
 
@@ -65,6 +69,7 @@ const (
 	RegexExtractor IdExtractorType = "regex"
 
 	// For multi-type auth
+	AuthTypeNone  AuthTypeEnum = ""
 	AuthToken     AuthTypeEnum = "auth_token"
 	HMACKey       AuthTypeEnum = "hmac_key"
 	BasicAuthUser AuthTypeEnum = "basic_auth_user"
@@ -87,6 +92,24 @@ const (
 	ExpirationTimeFormat = "2006-01-02 15:04"
 
 	Self = "self"
+
+	AuthTokenType = "authToken"
+	JWTType       = "jwt"
+	HMACType      = "hmac"
+	BasicType     = "basic"
+	CoprocessType = "coprocess"
+	OAuthType     = "oauth"
+	OIDCType      = "oidc"
+)
+
+var (
+	ErrAPIMigrated                = errors.New("the supplied API definition is in Tyk native format, please use OAS format for this API")
+	ErrAPINotMigrated             = errors.New("the supplied API definition is in OAS format, please use the Tyk native format for this API")
+	ErrOASGetForOldAPI            = errors.New("the requested API definition is in Tyk native format, please use old api endpoint")
+	ErrImportWithTykExtension     = errors.New("the import payload should not contain x-tyk-api-gateway")
+	ErrPayloadWithoutTykExtension = errors.New("the payload should contain x-tyk-api-gateway")
+	ErrAPINotFound                = errors.New("API not found")
+	ErrMissingAPIID               = errors.New("missing API ID")
 )
 
 type ObjectId bson.ObjectId
@@ -302,10 +325,11 @@ type MethodTransformMeta struct {
 }
 
 type ValidatePathMeta struct {
+	Disabled    bool                    `bson:"disabled" json:"disabled"`
 	Path        string                  `bson:"path" json:"path"`
 	Method      string                  `bson:"method" json:"method"`
-	Schema      map[string]interface{}  `bson:"schema" json:"schema"`
-	SchemaB64   string                  `bson:"schema_b64" json:"schema_b64,omitempty"`
+	Schema      map[string]interface{}  `bson:"-" json:"schema"`
+	SchemaB64   string                  `bson:"schema_b64" json:"-"`
 	SchemaCache gojsonschema.JSONLoader `bson:"-" json:"-"`
 	// Allows override of default 422 Unprocessible Entity response code for validation errors.
 	ErrorResponseCode int `bson:"error_response_code" json:"error_response_code"`
@@ -575,9 +599,9 @@ type APIDefinition struct {
 	ResponseProcessors         []ResponseProcessor    `bson:"response_processors" json:"response_processors"`
 	CORS                       CORSConfig             `bson:"CORS" json:"CORS"`
 	Domain                     string                 `bson:"domain" json:"domain"`
+	DomainDisabled             bool                   `bson:"domain_disabled" json:"domain_disabled"`
 	Certificates               []string               `bson:"certificates" json:"certificates"`
 	DoNotTrack                 bool                   `bson:"do_not_track" json:"do_not_track"`
-	Tags                       []string               `bson:"tags" json:"tags"`
 	EnableContextVars          bool                   `bson:"enable_context_vars" json:"enable_context_vars"`
 	ConfigData                 map[string]interface{} `bson:"config_data" json:"config_data"`
 	TagHeaders                 []string               `bson:"tag_headers" json:"tag_headers"`
@@ -585,6 +609,19 @@ type APIDefinition struct {
 	StripAuthData              bool                   `bson:"strip_auth_data" json:"strip_auth_data"`
 	EnableDetailedRecording    bool                   `bson:"enable_detailed_recording" json:"enable_detailed_recording"`
 	GraphQL                    GraphQLConfig          `bson:"graphql" json:"graphql"`
+	AnalyticsPlugin            AnalyticsPluginConfig  `bson:"analytics_plugin" json:"analytics_plugin"`
+
+	// Gateway segment tags
+	EnableTags bool     `bson:"enable_tags" json:"enable_tags"`
+	Tags       []string `bson:"tags" json:"tags"`
+	// IsOAS is set to true when API has an OAS definition (created in OAS or migrated to OAS)
+	IsOAS bool `json:"is_oas" bson:"is_oas"`
+}
+
+type AnalyticsPluginConfig struct {
+	Enabled    bool   `bson:"enable" json:"enable"`
+	PluginPath string `bson:"plugin_path" json:"plugin_path"`
+	FuncName   string `bson:"func_name" json:"func_name"`
 }
 
 type UptimeTests struct {
@@ -597,10 +634,12 @@ type UptimeTests struct {
 }
 
 type AuthConfig struct {
+	Name              string          `mapstructure:"name" bson:"name" json:"name"`
 	UseParam          bool            `mapstructure:"use_param" bson:"use_param" json:"use_param"`
 	ParamName         string          `mapstructure:"param_name" bson:"param_name" json:"param_name"`
 	UseCookie         bool            `mapstructure:"use_cookie" bson:"use_cookie" json:"use_cookie"`
 	CookieName        string          `mapstructure:"cookie_name" bson:"cookie_name" json:"cookie_name"`
+	DisableHeader     bool            `mapstructure:"disable_header" bson:"disable_header" json:"disable_header"`
 	AuthHeaderName    string          `mapstructure:"auth_header_name" bson:"auth_header_name" json:"auth_header_name"`
 	UseCertificate    bool            `mapstructure:"use_certificate" bson:"use_certificate" json:"use_certificate"`
 	ValidateSignature bool            `mapstructure:"validate_signature" bson:"validate_signature" json:"validate_signature"`
@@ -749,6 +788,7 @@ type GraphQLEngineDataSourceKind string
 const (
 	GraphQLEngineDataSourceKindREST    = "REST"
 	GraphQLEngineDataSourceKindGraphQL = "GraphQL"
+	GraphQLEngineDataSourceKindKafka   = "Kafka"
 )
 
 type GraphQLEngineDataSource struct {
@@ -776,6 +816,17 @@ type GraphQLEngineDataSourceConfigGraphQL struct {
 	URL     string            `bson:"url" json:"url"`
 	Method  string            `bson:"method" json:"method"`
 	Headers map[string]string `bson:"headers" json:"headers"`
+}
+
+type GraphQLEngineDataSourceConfigKafka struct {
+	BrokerAddr           string `bson:"broker_addr" json:"broker_addr"`
+	Topic                string `bson:"topic" json:"topic"`
+	GroupID              string `bson:"group_id" json:"group_id"`
+	ClientID             string `bson:"client_id" json:"client_id"`
+	KafkaVersion         string `bson:"kafka_version" json:"kafka_version"`
+	StartConsumingLatest bool   `json:"start_consuming_latest"`
+	BalanceStrategy      string `json:"balance_strategy"`
+	IsolationLevel       string `json:"isolation_level"`
 }
 
 type QueryVariable struct {
@@ -809,7 +860,7 @@ type GraphQLPlayground struct {
 	Path string `bson:"path" json:"path"`
 }
 
-// Clean will URL encode map[string]struct variables for saving
+// EncodeForDB will encode map[string]struct variables for saving in URL format
 func (a *APIDefinition) EncodeForDB() {
 	newVersion := make(map[string]VersionInfo)
 	for k, v := range a.VersionData.Versions {
@@ -838,7 +889,6 @@ func (a *APIDefinition) EncodeForDB() {
 
 			jsBytes, _ := json.Marshal(oldSchema.Schema)
 			oldSchema.SchemaB64 = base64.StdEncoding.EncodeToString(jsBytes)
-			oldSchema.Schema = nil
 
 			a.VersionData.Versions[i].ExtendedPaths.ValidateJSON[j] = oldSchema
 		}
@@ -1001,6 +1051,17 @@ func (s *StringRegexMap) Init() error {
 	}
 
 	return nil
+}
+
+func (a *APIDefinition) GenerateAPIID() {
+	a.APIID = strings.Replace(uuid.NewV4().String(), "-", "", -1)
+}
+
+func (a *APIDefinition) GetAPIDomain() string {
+	if a.DomainDisabled {
+		return ""
+	}
+	return a.Domain
 }
 
 func DummyAPI() APIDefinition {

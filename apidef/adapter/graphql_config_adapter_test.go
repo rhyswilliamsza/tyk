@@ -6,12 +6,12 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
 	graphqlDataSource "github.com/jensneuse/graphql-go-tools/pkg/engine/datasource/graphql_datasource"
+	kafkaDataSource "github.com/jensneuse/graphql-go-tools/pkg/engine/datasource/kafka_datasource"
 	restDataSource "github.com/jensneuse/graphql-go-tools/pkg/engine/datasource/rest_datasource"
 	"github.com/jensneuse/graphql-go-tools/pkg/engine/plan"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/TykTechnologies/tyk/apidef"
 )
@@ -441,6 +441,16 @@ func TestGraphQLConfigAdapter_engineConfigV2FieldConfigs(t *testing.T) {
 				},
 			},
 		},
+		{
+			TypeName:  "Subscription",
+			FieldName: "foobarTopicWithVariable",
+			Arguments: []plan.ArgumentConfiguration{
+				{
+					Name:       "name",
+					SourceType: plan.FieldArgumentSource,
+				},
+			},
+		},
 	}
 
 	var gqlConfig apidef.GraphQLConfig
@@ -530,7 +540,7 @@ func TestGraphQLConfigAdapter_engineConfigV2DataSources(t *testing.T) {
 			ChildNodes: []plan.TypeField{
 				{
 					TypeName:   "WithChildren",
-					FieldNames: []string{"id", "name"},
+					FieldNames: []string{"id", "name", "__typename"},
 				},
 			},
 			Factory: &restDataSource.Factory{
@@ -553,7 +563,7 @@ func TestGraphQLConfigAdapter_engineConfigV2DataSources(t *testing.T) {
 			ChildNodes: []plan.TypeField{
 				{
 					TypeName:   "Nested",
-					FieldNames: []string{"id", "name"},
+					FieldNames: []string{"id", "name", "__typename"},
 				},
 			},
 			Factory: &restDataSource.Factory{
@@ -576,11 +586,11 @@ func TestGraphQLConfigAdapter_engineConfigV2DataSources(t *testing.T) {
 			ChildNodes: []plan.TypeField{
 				{
 					TypeName:   "MultiRoot1",
-					FieldNames: []string{"id"},
+					FieldNames: []string{"id", "__typename"},
 				},
 				{
 					TypeName:   "MultiRoot2",
-					FieldNames: []string{"name"},
+					FieldNames: []string{"name", "__typename"},
 				},
 			},
 			Factory: &graphqlDataSource.Factory{
@@ -664,6 +674,81 @@ func TestGraphQLConfigAdapter_engineConfigV2DataSources(t *testing.T) {
 				},
 			}),
 		},
+		{
+			RootNodes: []plan.TypeField{
+				{
+					TypeName:   "Query",
+					FieldNames: []string{"idType"},
+				},
+			},
+			ChildNodes: []plan.TypeField{
+				{
+					TypeName:   "WithChildren",
+					FieldNames: []string{"id", "name", "__typename"},
+				},
+				{
+					TypeName:   "IDType",
+					FieldNames: []string{"id", "__typename"},
+				},
+			},
+			Factory: &graphqlDataSource.Factory{
+				HTTPClient: httpClient,
+			},
+			Custom: graphqlDataSource.ConfigJson(graphqlDataSource.Configuration{
+				Fetch: graphqlDataSource.FetchConfiguration{
+					URL:    "https://graphql.example.com",
+					Method: "POST",
+					Header: map[string][]string{
+						"Auth": {"123"},
+					},
+				},
+				Subscription: graphqlDataSource.SubscriptionConfiguration{
+					URL: "https://graphql.example.com",
+				},
+			}),
+		},
+		{
+			RootNodes: []plan.TypeField{
+				{
+					TypeName:   "Subscription",
+					FieldNames: []string{"foobar"},
+				},
+			},
+			Factory: &kafkaDataSource.Factory{},
+			Custom: kafkaDataSource.ConfigJSON(kafkaDataSource.Configuration{
+				Subscription: kafkaDataSource.SubscriptionConfiguration{
+					BrokerAddr:           "localhost:9092",
+					Topic:                "test.topic",
+					GroupID:              "test.consumer.group",
+					ClientID:             "test.client.id",
+					KafkaVersion:         "V2_8_0_0",
+					StartConsumingLatest: true,
+					BalanceStrategy:      kafkaDataSource.BalanceStrategySticky,
+					IsolationLevel:       kafkaDataSource.IsolationLevelReadCommitted,
+				},
+			}),
+		},
+		{
+			RootNodes: []plan.TypeField{
+				{
+					TypeName:   "Subscription",
+					FieldNames: []string{"foobarTopicWithVariable"},
+				},
+			},
+			Factory: &kafkaDataSource.Factory{},
+			Custom: kafkaDataSource.ConfigJSON(kafkaDataSource.Configuration{
+				Subscription: kafkaDataSource.SubscriptionConfiguration{
+					BrokerAddr:           "localhost:9092",
+					Topic:                "test.topic.{{.arguments.name}}",
+					GroupID:              "test.consumer.group",
+					ClientID:             "test.client.id",
+					KafkaVersion:         "V2_8_0_0",
+					StartConsumingLatest: true,
+					BalanceStrategy:      kafkaDataSource.BalanceStrategySticky,
+					IsolationLevel:       kafkaDataSource.IsolationLevelReadCommitted,
+				},
+			}),
+		},
 	}
 
 	var gqlConfig apidef.GraphQLConfig
@@ -678,7 +763,8 @@ func TestGraphQLConfigAdapter_engineConfigV2DataSources(t *testing.T) {
 
 	actualDataSources, err := adapter.engineConfigV2DataSources()
 	assert.NoError(t, err)
-	assert.ElementsMatch(t, expectedDataSources, actualDataSources)
+	require.Equal(t, expectedDataSources, actualDataSources)
+	//assert.ElementsMatch(t, expectedDataSources, actualDataSources)
 }
 
 const graphqlEngineV1ConfigJson = `{
@@ -699,8 +785,12 @@ var v2Schema = strconv.Quote(`type Query {
   restWithQueryParams(q: String, order: String, limit: Int): [String]
   restWithPathParams(id: String): [String]
   restWithFullUrlAsParam(url: String): [String]
+  idType: IDType!
 }
-type WithChildren {
+interface IDType {
+	id: ID!
+}
+type WithChildren implements IDType {
   id: ID!
   name: String
   nested: Nested
@@ -717,6 +807,10 @@ type MultiRoot2 {
 }
 type DeepGQL {
   query(code: String!): String
+}
+type Subscription {
+  foobar: Int
+  foobarTopicWithVariable(name: String): Int
 }`)
 
 var graphqlEngineV2ConfigJson = `{
@@ -869,6 +963,62 @@ var graphqlEngineV2ConfigJson = `{
 					"headers": {},
 					"query": [],
 					"body": ""
+				}
+			},
+			{
+				"kind": "GraphQL",
+				"internal": false,
+				"root_fields": [
+					{ "type": "Query", "fields": ["idType"] }
+				],
+				"config": {
+					"url": "https://graphql.example.com",
+					"method": "POST",
+					"headers": {
+						"Auth": "123"
+					}
+				}
+			},
+			{
+				"kind": "Kafka",
+				"name": "kafka-consumer-group",
+				"internal": false,
+				"root_fields": [{
+					"type": "Subscription",
+					"fields": [
+						"foobar"
+					]
+				}],
+				"config": {
+					"broker_addr": "localhost:9092",
+					"topic": "test.topic",
+					"group_id": "test.consumer.group",
+					"client_id": "test.client.id",
+					"kafka_version": "V2_8_0_0",
+					"start_consuming_latest": true,
+					"balance_strategy": "BalanceStrategySticky",
+					"isolation_level": "ReadCommitted"
+				}
+			},
+			{
+				"kind": "Kafka",
+				"name": "kafka-consumer-group-with-variable",
+				"internal": false,
+				"root_fields": [{
+					"type": "Subscription",
+					"fields": [
+						"foobarTopicWithVariable"
+					]
+				}],
+				"config": {
+					"broker_addr": "localhost:9092",
+					"topic": "test.topic.{{.arguments.name}}",
+					"group_id": "test.consumer.group",
+					"client_id": "test.client.id",
+					"kafka_version": "V2_8_0_0",
+					"start_consuming_latest": true,
+					"balance_strategy": "BalanceStrategySticky",
+					"isolation_level": "ReadCommitted"
 				}
 			}
 		]

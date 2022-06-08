@@ -27,6 +27,9 @@ const Schema = `{
 		"expiration": {
             "type": "string"
         },
+        "enable_tags": {
+            "type": "boolean"
+        },
         "enable_ip_whitelisting": {
             "type": "boolean"
         },
@@ -311,6 +314,9 @@ const Schema = `{
         },
         "domain": {
             "type": "string"
+        },
+        "domain_disabled": {
+             "type": "boolean"
         },
         "listen_port": {
             "type": "number"
@@ -662,7 +668,24 @@ const Schema = `{
             "required": [
                 "enabled"
             ]
-        }
+        },
+        "analytics_plugin": {
+            "type": ["object", "null"],
+            "properties": {
+                "enabled": {
+                    "type": "boolean"
+                },
+                "plugin_path": {
+                    "type": "string"
+                },
+                "func_name": {
+                    "type": "string"
+                }
+            }
+        },
+		"is_oas": {
+			"type": "boolean"
+		}
     },
     "required": [
         "name",

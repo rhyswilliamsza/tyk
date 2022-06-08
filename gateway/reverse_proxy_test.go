@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -131,7 +132,7 @@ type configTestReverseProxyDnsCache struct {
 	dnsConfig   config.DnsCacheConfig
 }
 
-func (s *Test) SetupTestReverseProxyDnsCache(cfg *configTestReverseProxyDnsCache) func() {
+func (s *Test) flakySetupTestReverseProxyDnsCache(cfg *configTestReverseProxyDnsCache) func() {
 	pullDomains := s.MockHandle.PushDomains(cfg.etcHostsMap, nil)
 	s.Gw.dnsCacheManager.InitDNSCaching(
 		time.Duration(cfg.dnsConfig.TTL)*time.Second, time.Duration(cfg.dnsConfig.CheckInterval)*time.Second)
@@ -151,6 +152,8 @@ func (s *Test) SetupTestReverseProxyDnsCache(cfg *configTestReverseProxyDnsCache
 }
 
 func TestReverseProxyDnsCache(t *testing.T) {
+	test.Flaky(t) // TODO: TT-5251
+
 	const (
 		host   = "orig-host.com."
 		host2  = "orig-host2.com."
@@ -180,7 +183,7 @@ func TestReverseProxyDnsCache(t *testing.T) {
 	ts := StartTest(nil)
 	defer ts.Close()
 
-	tearDown := ts.SetupTestReverseProxyDnsCache(&configTestReverseProxyDnsCache{t, etcHostsMap,
+	tearDown := ts.flakySetupTestReverseProxyDnsCache(&configTestReverseProxyDnsCache{t, etcHostsMap,
 		config.DnsCacheConfig{
 			Enabled: true, TTL: cacheTTL, CheckInterval: cacheUpdateInterval,
 			MultipleIPsHandleStrategy: config.NoCacheStrategy}})
@@ -428,6 +431,8 @@ func TestSingleJoiningSlash(t *testing.T) {
 		a, b, want string
 	}{
 		{"foo/", "", "foo/"},
+		{"foo/", "/name", "foo/name"},
+		{"foo/", "/", "foo/"},
 		{"foo", "", "foo"},
 	}
 	for _, tc := range testsTrue {
@@ -897,6 +902,94 @@ func TestGraphQL_InternalDataSource(t *testing.T) {
 	})
 }
 
+func TestGraphQL_InternalDataSource_memConnProviders(t *testing.T) {
+	g := StartTest(nil)
+	defer g.Close()
+
+	// tests run in parallel and memConnProviders is a global struct.
+	// For consistency, we use unique names for the subgraphs.
+	tykSubgraphAccounts := BuildAPI(func(spec *APISpec) {
+		spec.Name = fmt.Sprintf("subgraph-accounts-%d", rand.Intn(1000))
+		spec.APIID = "subgraph1"
+		spec.Proxy.TargetURL = testSubgraphAccounts
+		spec.Proxy.ListenPath = "/tyk-subgraph-accounts"
+		spec.GraphQL = apidef.GraphQLConfig{
+			Enabled:       true,
+			ExecutionMode: apidef.GraphQLExecutionModeSubgraph,
+			Version:       apidef.GraphQLConfigVersion2,
+			Schema:        gqlSubgraphSchemaAccounts,
+			Subgraph: apidef.GraphQLSubgraphConfig{
+				SDL: gqlSubgraphSDLAccounts,
+			},
+		}
+	})[0]
+
+	tykSubgraphReviews := BuildAPI(func(spec *APISpec) {
+		spec.Name = fmt.Sprintf("subgraph-reviews-%d", rand.Intn(1000))
+		spec.APIID = "subgraph2"
+		spec.Proxy.TargetURL = testSubgraphReviews
+		spec.Proxy.ListenPath = "/tyk-subgraph-reviews"
+		spec.GraphQL = apidef.GraphQLConfig{
+			Enabled:       true,
+			ExecutionMode: apidef.GraphQLExecutionModeSubgraph,
+			Version:       apidef.GraphQLConfigVersion2,
+			Schema:        gqlSubgraphSchemaReviews,
+			Subgraph: apidef.GraphQLSubgraphConfig{
+				SDL: gqlSubgraphSDLReviews,
+			},
+		}
+	})[0]
+
+	supergraph := BuildAPI(func(spec *APISpec) {
+		spec.Proxy.ListenPath = "/"
+		spec.APIID = "supergraph"
+		spec.GraphQL = apidef.GraphQLConfig{
+			Enabled:       true,
+			Version:       apidef.GraphQLConfigVersion2,
+			ExecutionMode: apidef.GraphQLExecutionModeSupergraph,
+			Supergraph: apidef.GraphQLSupergraphConfig{
+				Subgraphs: []apidef.GraphQLSubgraphEntity{
+					{
+						APIID: "subgraph1",
+						URL:   "tyk://" + tykSubgraphAccounts.Name,
+						SDL:   gqlSubgraphSDLAccounts,
+					},
+					{
+						APIID: "subgraph2",
+						URL:   "tyk://" + tykSubgraphReviews.Name,
+						SDL:   gqlSubgraphSDLReviews,
+					},
+				},
+				MergedSDL: gqlMergedSupergraphSDL,
+			},
+			Schema: gqlMergedSupergraphSDL,
+		}
+	})[0]
+
+	g.Gw.LoadAPI(tykSubgraphAccounts, tykSubgraphReviews, supergraph)
+
+	reviews := graphql.Request{
+		Query: `query Query { me { id username reviews { body } } }`,
+	}
+
+	_, _ = g.Run(t, []test.TestCase{
+		{Data: reviews, BodyMatch: `{"data":{"me":{"id":"1","username":"tyk","reviews":\[{"body":"A highly effective form of birth control."},{"body":"Fedoras are one of the most fashionable hats around and can look great with a variety of outfits."}\]}}}`, Code: http.StatusOK},
+	}...)
+
+	memConnProviders.mtx.Lock()
+	require.Contains(t, memConnProviders.m, tykSubgraphAccounts.Name)
+	require.Contains(t, memConnProviders.m, tykSubgraphReviews.Name)
+	memConnProviders.mtx.Unlock()
+
+	// Remove memconn.Provider structs from the cache, if they are idle for a while.
+	cleanIdleMemConnProvidersEagerly(time.Now().Add(2 * time.Minute))
+
+	memConnProviders.mtx.Lock()
+	require.NotContains(t, memConnProviders.m, tykSubgraphAccounts.Name)
+	require.NotContains(t, memConnProviders.m, tykSubgraphReviews.Name)
+	memConnProviders.mtx.Unlock()
+}
+
 func TestGraphQL_ProxyIntrospectionInterrupt(t *testing.T) {
 	g := StartTest(nil)
 	defer g.Close()
@@ -1119,7 +1212,7 @@ func TestReverseProxyWebSocketCancelation(t *testing.T) {
 				return
 			}
 			bufrw.Flush()
-			time.Sleep(time.Second)
+			time.Sleep(20 * time.Millisecond)
 		}
 		if _, err := bufrw.WriteString(terminalMsg); err != nil {
 			select {
@@ -1202,6 +1295,8 @@ func TestReverseProxyWebSocketCancelation(t *testing.T) {
 }
 
 func TestSSE(t *testing.T) {
+	test.Flaky(t) // TODO: TT-5250
+
 	// send and receive should be in order
 	var wg sync.WaitGroup
 

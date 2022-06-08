@@ -18,12 +18,12 @@ import (
 	"text/template"
 	"time"
 
-	"github.com/getkin/kin-openapi/openapi3"
+	"github.com/TykTechnologies/tyk/apidef/oas"
 
 	"github.com/cenk/backoff"
 	"github.com/jensneuse/graphql-go-tools/pkg/engine/resolve"
 
-	"gopkg.in/Masterminds/sprig.v2"
+	"github.com/Masterminds/sprig/v3"
 
 	circuit "github.com/TykTechnologies/circuitbreaker"
 	"github.com/gorilla/mux"
@@ -32,6 +32,7 @@ import (
 
 	"github.com/TykTechnologies/gojsonschema"
 
+	"github.com/TykTechnologies/tyk-pump/analytics"
 	"github.com/TykTechnologies/tyk/apidef"
 	"github.com/TykTechnologies/tyk/config"
 	"github.com/TykTechnologies/tyk/headers"
@@ -166,7 +167,7 @@ type ExtendedCircuitBreakerMeta struct {
 // flattened URL list is checked for matching paths and then it's status evaluated if found.
 type APISpec struct {
 	*apidef.APIDefinition
-	OAS openapi3.Swagger
+	OAS oas.OAS
 	sync.RWMutex
 
 	RxPaths                  map[string][]URLSpec
@@ -192,10 +193,11 @@ type APISpec struct {
 	WSTransportCreated       time.Time
 	GlobalConfig             config.Config
 	OrgHasNoSession          bool
+	AnalyticsPluginConfig    *GoAnalyticsPlugin
 
 	middlewareChain *ChainObject
 
-	network NetworkStats
+	network analytics.NetworkStats
 
 	GraphQLExecutor struct {
 		Engine   *graphql.ExecutionEngine
@@ -269,11 +271,13 @@ func (a APIDefinitionLoader) MakeSpec(def *apidef.APIDefinition, logger *logrus.
 	}
 
 	// new expiration feature
-	if t, err := time.Parse(apidef.ExpirationTimeFormat, def.Expiration); err != nil {
-		logger.WithError(err).WithField("name", def.Name).WithField("Expiration", def.Expiration).
-			Error("Could not parse expiration date for API")
-	} else {
-		def.ExpirationTs = t
+	if def.Expiration != "" {
+		if t, err := time.Parse(apidef.ExpirationTimeFormat, def.Expiration); err != nil {
+			logger.WithError(err).WithField("name", def.Name).WithField("Expiration", def.Expiration).
+				Error("Could not parse expiration date for API")
+		} else {
+			def.ExpirationTs = t
+		}
 	}
 
 	// Deprecated
@@ -529,7 +533,7 @@ func (a APIDefinitionLoader) ParseDefinition(r io.Reader) (api apidef.APIDefinit
 	return
 }
 
-func (a APIDefinitionLoader) ParseOAS(r io.Reader) (oas openapi3.Swagger) {
+func (a APIDefinitionLoader) ParseOAS(r io.Reader) (oas oas.OAS) {
 	if err := json.NewDecoder(r).Decode(&oas); err != nil {
 		log.Error("Couldn't unmarshal oas configuration: ", err)
 	}
@@ -1004,16 +1008,20 @@ func (a APIDefinitionLoader) compileTrackedEndpointPathspathSpec(paths []apidef.
 }
 
 func (a APIDefinitionLoader) compileValidateJSONPathspathSpec(paths []apidef.ValidatePathMeta, stat URLStatus, conf config.Config) []URLSpec {
-	urlSpec := make([]URLSpec, len(paths))
+	var urlSpec []URLSpec
 
-	for i, stringSpec := range paths {
+	for _, stringSpec := range paths {
+		if stringSpec.Disabled {
+			continue
+		}
+
 		newSpec := URLSpec{}
 		a.generateRegex(stringSpec.Path, &newSpec, stat, conf)
 		// Extend with method actions
 
 		stringSpec.SchemaCache = gojsonschema.NewGoLoader(stringSpec.Schema)
 		newSpec.ValidatePathMeta = stringSpec
-		urlSpec[i] = newSpec
+		urlSpec = append(urlSpec, newSpec)
 	}
 
 	return urlSpec
@@ -1538,7 +1546,7 @@ func (a *APISpec) Version(r *http.Request) (*apidef.VersionInfo, RequestStatus) 
 }
 
 func (a *APISpec) StripListenPath(r *http.Request, path string) string {
-	return stripListenPath(a.Proxy.ListenPath, path, mux.Vars(r))
+	return stripListenPath(a.Proxy.ListenPath, path)
 }
 
 func (a *APISpec) SanitizeProxyPaths(r *http.Request) {
@@ -1569,9 +1577,7 @@ func (r *RoundRobin) WithLen(len int) int {
 	return int(cur) % len
 }
 
-var listenPathVarsRE = regexp.MustCompile(`{[^:]+(:[^}]+)?}`)
-
-func stripListenPath(listenPath, path string, muxVars map[string]string) (res string) {
+func stripListenPath(listenPath, path string) (res string) {
 	defer func() {
 		if !strings.HasPrefix(res, "/") {
 			res = "/" + res
@@ -1583,13 +1589,11 @@ func stripListenPath(listenPath, path string, muxVars map[string]string) (res st
 		return
 	}
 
-	lp := listenPathVarsRE.ReplaceAllStringFunc(listenPath, func(match string) string {
-		match = strings.TrimLeft(match, "{")
-		match = strings.TrimRight(match, "}")
-		aliasVar := strings.Split(match, ":")[0]
-		return muxVars[aliasVar]
-	})
-
-	res = strings.TrimPrefix(path, lp)
-	return
+	tmp := new(mux.Route).PathPrefix(listenPath)
+	s, err := tmp.GetPathRegexp()
+	if err != nil {
+		return path
+	}
+	reg := regexp.MustCompile(s)
+	return reg.ReplaceAllString(path, "")
 }

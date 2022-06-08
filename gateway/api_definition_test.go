@@ -554,6 +554,8 @@ func TestIgnored(t *testing.T) {
 }
 
 func TestOldMockResponse(t *testing.T) {
+	test.Racy(t) // TODO: TT-5225
+
 	ts := StartTest(nil)
 	defer ts.Close()
 
@@ -971,7 +973,6 @@ func TestGetVersionFromRequest(t *testing.T) {
 	t.Run("Header location", func(t *testing.T) {
 		ts := StartTest(nil)
 		defer func() {
-			time.Sleep(1 * time.Second)
 			ts.Close()
 		}()
 
@@ -1261,13 +1262,18 @@ func TestAPIExpiration(t *testing.T) {
 }
 
 func TestStripListenPath(t *testing.T) {
-	assert.Equal(t, "/get", stripListenPath("/listen", "/listen/get", nil))
-	assert.Equal(t, "/get", stripListenPath("/listen/", "/listen/get", nil))
-	assert.Equal(t, "/get", stripListenPath("listen", "listen/get", nil))
-	assert.Equal(t, "/get", stripListenPath("listen/", "listen/get", nil))
-	assert.Equal(t, "/", stripListenPath("/listen/", "/listen/", nil))
-	assert.Equal(t, "/", stripListenPath("/listen", "/listen", nil))
-	assert.Equal(t, "/", stripListenPath("listen/", "", nil))
+	assert.Equal(t, "/get", stripListenPath("/listen", "/listen/get"))
+	assert.Equal(t, "/get", stripListenPath("/listen/", "/listen/get"))
+	assert.Equal(t, "/get", stripListenPath("listen", "listen/get"))
+	assert.Equal(t, "/get", stripListenPath("listen/", "listen/get"))
+	assert.Equal(t, "/", stripListenPath("/listen/", "/listen/"))
+	assert.Equal(t, "/", stripListenPath("/listen", "/listen"))
+	assert.Equal(t, "/", stripListenPath("listen/", ""))
+
+	assert.Equal(t, "/get", stripListenPath("/{_:.*}/post/", "/listen/post/get"))
+	assert.Equal(t, "/get", stripListenPath("/{_:.*}/", "/listen/get"))
+	assert.Equal(t, "/get", stripListenPath("/pre/{_:.*}/", "/pre/listen/get"))
+	assert.Equal(t, "/", stripListenPath("/{_:.*}", "/listen"))
 }
 
 func TestAPISpec_SanitizeProxyPaths(t *testing.T) {
@@ -1295,6 +1301,8 @@ func TestAPISpec_SanitizeProxyPaths(t *testing.T) {
 }
 
 func TestEnforcedTimeout(t *testing.T) {
+	test.Flaky(t) // TODO TT-5222
+
 	ts := StartTest(nil)
 	defer ts.Close()
 
