@@ -256,6 +256,9 @@ const Schema = `{
                 }
             }
         },
+		"respect_key_session_lifetime": {
+            "type": "boolean"
+        },
         "session_lifetime": {
             "type": "number"
         },
