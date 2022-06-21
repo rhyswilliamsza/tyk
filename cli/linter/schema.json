@@ -423,6 +423,9 @@
     "global_session_lifetime": {
       "type": "integer"
     },
+    "respect_key_expiration": {
+      "type": "boolean"
+    },
     "graylog_network_addr": {
       "type": "string"
     },

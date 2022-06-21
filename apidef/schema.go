@@ -256,7 +256,7 @@ const Schema = `{
                 }
             }
         },
-		"respect_key_session_lifetime": {
+        "respect_key_expiration": {
             "type": "boolean"
         },
         "session_lifetime": {

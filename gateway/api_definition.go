@@ -212,6 +212,14 @@ type APISpec struct {
 	} `json:"-"`
 }
 
+func (a *APISpec) GetRespectKeyExpiration() bool {
+	if a.GlobalConfig.RespectKeyExpiration {
+		return true
+	}
+
+	return a.RespectKeyExpiration
+}
+
 // Release releases all resources associated with API spec
 func (s *APISpec) Release() {
 	// release circuit breaker resources

@@ -1386,3 +1386,25 @@ func TestEnforcedTimeout(t *testing.T) {
 		})
 	})
 }
+
+func TestAPISpec_GetRespectKeyExpiration(t *testing.T) {
+	a := APISpec{APIDefinition: &apidef.APIDefinition{}}
+
+	t.Run("GlobalRespectKeyExpiration=false", func(t *testing.T) {
+		a.GlobalConfig.RespectKeyExpiration = false
+		a.RespectKeyExpiration = false
+		assert.False(t, a.GetRespectKeyExpiration())
+
+		a.RespectKeyExpiration = true
+		assert.True(t, a.GetRespectKeyExpiration())
+	})
+
+	t.Run("GlobalRespectKeyExpiration=true", func(t *testing.T) {
+		a.GlobalConfig.RespectKeyExpiration = true
+		a.RespectKeyExpiration = false
+		assert.True(t, a.GetRespectKeyExpiration())
+
+		a.RespectKeyExpiration = true
+		assert.True(t, a.GetRespectKeyExpiration())
+	})
+}
