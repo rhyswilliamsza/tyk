@@ -43,7 +43,9 @@ func (b *BatchRequestHandler) doRequest(req *http.Request, relURL string) BatchR
 	tr := &http.Transport{TLSClientConfig: &tls.Config{}}
 
 	if cert := b.Gw.getUpstreamCertificate(req.Host, b.API); cert != nil {
-		tr.TLSClientConfig.Certificates = []tls.Certificate{*cert}
+		tr.TLSClientConfig.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			return cert, nil
+		}
 	}
 
 	tr.TLSClientConfig.InsecureSkipVerify = b.Gw.GetConfig().ProxySSLInsecureSkipVerify
