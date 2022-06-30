@@ -527,7 +527,9 @@ func (j *JSVM) LoadTykJSApi() {
 		}}
 
 		if cert := getUpstreamCertificate(r.Host, j.Spec); cert != nil {
-			tr.TLSClientConfig.Certificates = []tls.Certificate{*cert}
+			tr.TLSClientConfig.GetClientCertificate = func(cri *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+				return cert, nil
+			}
 		}
 
 		if config.Global().ProxySSLInsecureSkipVerify {
